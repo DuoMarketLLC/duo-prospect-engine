@@ -1,0 +1,208 @@
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+from pathlib import Path
+from typing import Any
+
+ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_DATA_FILE = ROOT / "data" / "mock_businesses.json"
+DEFAULT_OUTPUT_DIR = ROOT / "output"
+
+
+def load_mock_businesses(data_file: Path = DEFAULT_DATA_FILE) -> list[dict[str, Any]]:
+    """Load local mock businesses used for the first version of the engine."""
+    with data_file.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def search_businesses(keyword: str, businesses: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Simple keyword search against name + industry.
+
+    This is intentionally basic so it is easy to understand and improve later.
+    """
+    query = keyword.lower().strip()
+
+    if not query:
+        return businesses
+
+    matches: list[dict[str, Any]] = []
+    for business in businesses:
+        text = f"{business.get('business_name', '')} {business.get('industry', '')}".lower()
+        if query in text:
+            matches.append(business)
+
+    if matches:
+        return matches
+
+    query_terms = query.split()
+    for business in businesses:
+        text = f"{business.get('business_name', '')} {business.get('industry', '')}".lower()
+        if any(term in text for term in query_terms):
+            matches.append(business)
+    return matches
+
+
+def score_lead(raw: dict[str, Any], keyword: str) -> tuple[int, dict[str, bool], str]:
+    """Score a lead using the rules in lead_scoring.md."""
+    score = 0
+
+    has_website = bool(raw.get("website"))
+    website_quality = raw.get("website_quality", "low").lower()
+
+    # Website
+    if has_website:
+        score += 10
+    if website_quality in {"high", "modern", "professional"}:
+        score += 10
+    elif website_quality in {"low", "weak", "outdated"}:
+        score += 3
+
+    # Contactability
+    if raw.get("email"):
+        score += 10
+    if raw.get("phone"):
+        score += 5
+    if raw.get("contact_name"):
+        score += 10
+
+    # Business Activity
+    if raw.get("active_social"):
+        score += 10
+    if raw.get("selling_products"):
+        score += 10
+    if raw.get("is_operating"):
+        score += 10
+
+    industry = raw.get("industry", "").lower()
+    name = raw.get("business_name", "").lower()
+    search_text = f"{name} {industry} {keyword.lower()}"
+
+    # Service fit flags + scoring
+    likely_needs_ebroker = any(term in search_text for term in ["food", "beverage", "cpg", "snack", "brand"])
+    likely_needs_plug_play = likely_needs_ebroker or "retail" in search_text
+    likely_needs_bidcloser = any(term in search_text for term in ["plumbing", "roof", "contractor", "builder", "trades", "service"])
+    likely_needs_bidrescue = likely_needs_bidcloser and any(
+        term in search_text for term in ["plumbing", "roof", "deck", "fencing", "remodel", "trades"]
+    )
+
+    if likely_needs_ebroker:
+        score += 10
+    if likely_needs_plug_play:
+        score += 10
+    if likely_needs_bidcloser:
+        score += 10
+    if likely_needs_bidrescue:
+        score += 10
+
+    # Negative signals
+    if raw.get("broken_website"):
+        score -= 10
+    if not any([has_website, raw.get("email"), raw.get("phone"), raw.get("active_social")]):
+        score -= 15
+
+    irrelevant_industries = {"government", "school", "hospital"}
+    if industry in irrelevant_industries:
+        score -= 25
+
+    score = max(1, min(score, 100))
+
+    if score >= 80:
+        priority = "High"
+    elif score >= 60:
+        priority = "Medium"
+    elif score >= 40:
+        priority = "Low"
+    else:
+        priority = "Ignore for now"
+
+    qualification = {
+        "likely_needs_ebroker": likely_needs_ebroker,
+        "likely_needs_bidcloser": likely_needs_bidcloser,
+        "likely_needs_bidrescue": likely_needs_bidrescue,
+        "likely_needs_plug_play_marketer": likely_needs_plug_play,
+    }
+    return score, qualification, priority
+
+
+def build_leads(keyword: str, businesses: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Build leads in the schema format."""
+    leads = []
+    for raw in search_businesses(keyword, businesses):
+        score, qualification, priority = score_lead(raw, keyword)
+
+        lead = {
+            "business_name": raw.get("business_name", ""),
+            "website_url": raw.get("website") or "https://placeholder-website.example",
+            "industry": raw.get("industry", "Unknown"),
+            "location": raw.get("location", "Unknown"),
+            "contact_name": raw.get("contact_name", ""),
+            "email": raw.get("email", ""),
+            "phone": raw.get("phone", ""),
+            "has_website": "Yes" if raw.get("website") else "No",
+            "website_quality": raw.get("website_quality", "Low").title(),
+            "active_on_social_media": "Yes" if raw.get("active_social") else "No",
+            "selling_products": "Yes" if raw.get("selling_products") else "No",
+            "likely_needs_ebroker": "Yes" if qualification["likely_needs_ebroker"] else "No",
+            "likely_needs_bidcloser": "Yes" if qualification["likely_needs_bidcloser"] else "No",
+            "likely_needs_bidrescue": "Yes" if qualification["likely_needs_bidrescue"] else "No",
+            "likely_needs_plug_play_marketer": "Yes" if qualification["likely_needs_plug_play_marketer"] else "No",
+            "lead_score": score,
+            "priority": priority,
+            "observations": f"Matched keyword '{keyword}'.",
+            "why_good_fit": f"Scored {score}/100 based on website, contactability, activity, and service fit.",
+        }
+        leads.append(lead)
+
+    return leads
+
+
+def save_json(leads: list[dict[str, Any]], output_file: Path) -> None:
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    with output_file.open("w", encoding="utf-8") as handle:
+        json.dump(leads, handle, indent=2)
+
+
+def save_csv(leads: list[dict[str, Any]], output_file: Path) -> None:
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    if not leads:
+        output_file.write_text("", encoding="utf-8")
+        return
+
+    with output_file.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(leads[0].keys()))
+        writer.writeheader()
+        writer.writerows(leads)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="DUO Prospect Engine (v1)")
+    parser.add_argument("keyword", help="Example: 'beverage brand' or 'plumbing company'")
+    parser.add_argument("--format", choices=["json", "csv"], default="json", help="Output format")
+    parser.add_argument("--output", default="", help="Optional output path")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+
+    businesses = load_mock_businesses()
+    leads = build_leads(args.keyword, businesses)
+
+    if args.output:
+        output_path = Path(args.output)
+    else:
+        output_path = DEFAULT_OUTPUT_DIR / f"leads_{args.keyword.replace(' ', '_')}.{args.format}"
+
+    if args.format == "json":
+        save_json(leads, output_path)
+    else:
+        save_csv(leads, output_path)
+
+    print(f"Generated {len(leads)} leads for keyword '{args.keyword}'.")
+    print(f"Saved to: {output_path}")
+
+
+if __name__ == "__main__":
+    main()
