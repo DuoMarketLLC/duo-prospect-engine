@@ -8,15 +8,110 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DATA_FILE = ROOT / "data" / "mock_businesses.json"
+DEFAULT_GOOGLE_MAPS_CSV = ROOT / "data" / "google_maps_sample.csv"
 DEFAULT_OUTPUT_DIR = ROOT / "output"
 DEFAULT_PROFILE = "cpg_brokerage"
 SUPPORTED_PROFILES = {"cpg_brokerage", "trades_bidcloser", "real_estate_agents"}
+SUPPORTED_INPUT_SOURCES = {"mock", "google_maps_csv"}
 
 
 def load_mock_businesses(data_file: Path = DEFAULT_DATA_FILE) -> list[dict[str, Any]]:
     """Load local mock businesses used for the first version of the engine."""
     with data_file.open("r", encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def _parse_int(value: str) -> int | None:
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        return None
+
+
+def _parse_float(value: str) -> float | None:
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def infer_selling_products(category: str) -> bool:
+    """Infer if a business likely sells products based on category wording."""
+    text = category.lower()
+    product_signals = {
+        "store",
+        "shop",
+        "market",
+        "retail",
+        "bakery",
+        "restaurant",
+        "cafe",
+        "food",
+        "beverage",
+        "boutique",
+        "pharmacy",
+        "dealer",
+        "brand",
+    }
+    return any(signal in text for signal in product_signals)
+
+
+def load_google_maps_csv(data_file: Path) -> list[dict[str, Any]]:
+    """Load Google Maps-style CSV rows and map them into DUO raw business shape."""
+    with data_file.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        required_fields = {
+            "business_name",
+            "category",
+            "website_url",
+            "phone",
+            "address",
+            "city",
+            "state",
+            "rating",
+            "review_count",
+        }
+
+        if not reader.fieldnames:
+            raise ValueError("CSV is missing a header row.")
+
+        missing = sorted(required_fields - set(reader.fieldnames))
+        if missing:
+            raise ValueError(f"CSV is missing required columns: {', '.join(missing)}")
+
+        businesses: list[dict[str, Any]] = []
+        for row in reader:
+            website_url = row.get("website_url", "").strip()
+            category = row.get("category", "").strip()
+            city = row.get("city", "").strip()
+            state = row.get("state", "").strip()
+            location = ", ".join(part for part in [city, state] if part) or "Unknown"
+
+            mapped = {
+                "business_name": row.get("business_name", "").strip(),
+                "industry": category or "Unknown",
+                "website": website_url,
+                "phone": row.get("phone", "").strip(),
+                "location": location,
+                "contact_name": "",
+                "email": "",
+                "website_quality": "medium" if website_url else "low",
+                "active_social": False,
+                "selling_products": infer_selling_products(category),
+                "is_operating": True,
+                "google_maps_address": row.get("address", "").strip(),
+                "google_maps_rating": _parse_float(row.get("rating", "")),
+                "google_maps_review_count": _parse_int(row.get("review_count", "")),
+            }
+            businesses.append(mapped)
+
+        return businesses
 
 
 def search_businesses(keyword: str, businesses: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -183,6 +278,15 @@ def build_leads(keyword: str, businesses: list[dict[str, Any]], profile: str) ->
     for raw in search_businesses(keyword, businesses):
         score, qualification, priority, profile_context = score_lead(raw, keyword, profile)
 
+        google_context_bits = []
+        if raw.get("google_maps_address"):
+            google_context_bits.append(f"Address: {raw['google_maps_address']}.")
+        if raw.get("google_maps_rating") is not None:
+            google_context_bits.append(f"Rating: {raw['google_maps_rating']}/5.")
+        if raw.get("google_maps_review_count") is not None:
+            google_context_bits.append(f"Reviews: {raw['google_maps_review_count']}.")
+        google_context = " ".join(google_context_bits)
+
         lead = {
             "business_name": raw.get("business_name", ""),
             "website_url": raw.get("website") or "https://placeholder-website.example",
@@ -202,7 +306,9 @@ def build_leads(keyword: str, businesses: list[dict[str, Any]], profile: str) ->
             "service_profile": profile,
             "lead_score": score,
             "priority": priority,
-            "observations": f"Matched keyword '{keyword}'. {profile_context}",
+            "observations": (
+                f"Matched keyword '{keyword}'. {profile_context} {google_context}".strip()
+            ),
             "why_good_fit": f"Scored {score}/100 based on website, contactability, activity, and service fit.",
         }
         leads.append(lead)
@@ -230,23 +336,47 @@ def save_csv(leads: list[dict[str, Any]], output_file: Path) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="DUO Prospect Engine (v1)")
-    parser.add_argument("keyword", help="Example: 'beverage brand' or 'plumbing company'")
+    parser.add_argument("keyword", nargs="?", default="", help="Example: 'beverage brand' or 'plumbing company'")
     parser.add_argument("--format", choices=["json", "csv"], default="json", help="Output format")
     parser.add_argument("--output", default="", help="Optional output path")
     parser.add_argument("--profile", choices=sorted(SUPPORTED_PROFILES), default=DEFAULT_PROFILE, help="Service profile")
+    parser.add_argument(
+        "--input-source",
+        choices=sorted(SUPPORTED_INPUT_SOURCES),
+        default="mock",
+        help="Data source: 'mock' for bundled JSON, 'google_maps_csv' for CSV imports.",
+    )
+    parser.add_argument(
+        "--input-file",
+        default="",
+        help="Optional input path. In google_maps_csv mode, defaults to data/google_maps_sample.csv.",
+    )
     return parser.parse_args()
+
+
+def _load_input_businesses(input_source: str, input_file: str) -> list[dict[str, Any]]:
+    if input_source == "mock":
+        data_file = Path(input_file) if input_file else DEFAULT_DATA_FILE
+        return load_mock_businesses(data_file)
+
+    if input_source == "google_maps_csv":
+        data_file = Path(input_file) if input_file else DEFAULT_GOOGLE_MAPS_CSV
+        return load_google_maps_csv(data_file)
+
+    raise ValueError(f"Unsupported input source: {input_source}")
 
 
 def main() -> None:
     args = parse_args()
 
-    businesses = load_mock_businesses()
+    businesses = _load_input_businesses(args.input_source, args.input_file)
     leads = build_leads(args.keyword, businesses, args.profile)
 
     if args.output:
         output_path = Path(args.output)
     else:
-        output_path = DEFAULT_OUTPUT_DIR / f"leads_{args.keyword.replace(' ', '_')}.{args.format}"
+        keyword_slug = args.keyword.replace(" ", "_") if args.keyword else "all"
+        output_path = DEFAULT_OUTPUT_DIR / f"leads_{args.input_source}_{keyword_slug}.{args.format}"
 
     if args.format == "json":
         save_json(leads, output_path)
@@ -254,6 +384,7 @@ def main() -> None:
         save_csv(leads, output_path)
 
     print(f"Generated {len(leads)} leads for keyword '{args.keyword}'.")
+    print(f"Input source: {args.input_source}")
     print(f"Saved to: {output_path}")
 
 
