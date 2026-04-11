@@ -41,6 +41,21 @@ def _parse_float(value: str) -> float | None:
         return None
 
 
+def _resolve_website_url(raw: dict[str, Any]) -> str:
+    """Resolve website URL from backward-compatible raw fields."""
+    return str(raw.get("website") or raw.get("website_url") or "").strip()
+
+
+def _default_website_quality(raw: dict[str, Any], website_url: str) -> str:
+    """Normalize website quality and enforce minimum quality when a site exists."""
+    quality = str(raw.get("website_quality", "")).strip().lower()
+    if not quality:
+        return "medium" if website_url else "low"
+    if website_url and quality in {"low", "weak", "outdated"}:
+        return "medium"
+    return quality
+
+
 def infer_selling_products(category: str) -> bool:
     """Infer if a business likely sells products based on category wording."""
     text = category.lower()
@@ -193,8 +208,9 @@ def score_lead(raw: dict[str, Any], keyword: str, profile: str) -> tuple[int, di
     """Score a lead using the rules in lead_scoring.md."""
     score = 0
 
-    has_website = bool(raw.get("website"))
-    website_quality = raw.get("website_quality", "low").lower()
+    website_url = _resolve_website_url(raw)
+    has_website = bool(website_url)
+    website_quality = _default_website_quality(raw, website_url)
 
     # Website
     if has_website:
@@ -277,6 +293,9 @@ def build_leads(keyword: str, businesses: list[dict[str, Any]], profile: str) ->
     leads = []
     for raw in search_businesses(keyword, businesses):
         score, qualification, priority, profile_context = score_lead(raw, keyword, profile)
+        website_url = _resolve_website_url(raw)
+        has_website = bool(website_url)
+        website_quality = _default_website_quality(raw, website_url)
 
         google_context_bits = []
         if raw.get("google_maps_address"):
@@ -289,14 +308,14 @@ def build_leads(keyword: str, businesses: list[dict[str, Any]], profile: str) ->
 
         lead = {
             "business_name": raw.get("business_name", ""),
-            "website_url": raw.get("website") or "https://placeholder-website.example",
+            "website_url": website_url,
             "industry": raw.get("industry", "Unknown"),
             "location": raw.get("location", "Unknown"),
             "contact_name": raw.get("contact_name", ""),
             "email": raw.get("email", ""),
             "phone": raw.get("phone", ""),
-            "has_website": "Yes" if raw.get("website") else "No",
-            "website_quality": raw.get("website_quality", "Low").title(),
+            "has_website": "Yes" if has_website else "No",
+            "website_quality": website_quality.title(),
             "active_on_social_media": "Yes" if raw.get("active_social") else "No",
             "selling_products": "Yes" if raw.get("selling_products") else "No",
             "likely_needs_ebroker": "Yes" if qualification["likely_needs_ebroker"] else "No",
@@ -306,6 +325,9 @@ def build_leads(keyword: str, businesses: list[dict[str, Any]], profile: str) ->
             "service_profile": profile,
             "lead_score": score,
             "priority": priority,
+            "google_maps_address": raw.get("google_maps_address", ""),
+            "google_maps_rating": raw.get("google_maps_rating"),
+            "google_maps_review_count": raw.get("google_maps_review_count"),
             "observations": (
                 f"Matched keyword '{keyword}'. {profile_context} {google_context}".strip()
             ),
