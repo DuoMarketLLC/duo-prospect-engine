@@ -9,6 +9,8 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DATA_FILE = ROOT / "data" / "mock_businesses.json"
 DEFAULT_OUTPUT_DIR = ROOT / "output"
+DEFAULT_PROFILE = "cpg_brokerage"
+SUPPORTED_PROFILES = {"cpg_brokerage", "trades_bidcloser", "real_estate_agents"}
 
 
 def load_mock_businesses(data_file: Path = DEFAULT_DATA_FILE) -> list[dict[str, Any]]:
@@ -44,7 +46,55 @@ def search_businesses(keyword: str, businesses: list[dict[str, Any]]) -> list[di
     return matches
 
 
-def score_lead(raw: dict[str, Any], keyword: str) -> tuple[int, dict[str, bool], str]:
+def apply_profile_scoring(
+    profile: str,
+    raw: dict[str, Any],
+    keyword: str,
+    score: int,
+    qualification: dict[str, bool],
+) -> tuple[int, str]:
+    """Apply profile-specific score boosts and return profile context text."""
+    industry = raw.get("industry", "").lower()
+    name = raw.get("business_name", "").lower()
+    search_text = f"{name} {industry} {keyword.lower()}"
+
+    if profile == "cpg_brokerage":
+        if raw.get("selling_products"):
+            score += 8
+        if raw.get("website_quality", "").lower() in {"high", "modern", "professional"}:
+            score += 6
+        if qualification["likely_needs_ebroker"]:
+            score += 6
+        if qualification["likely_needs_plug_play_marketer"]:
+            score += 6
+        context = "Evaluated under cpg_brokerage profile. Strong product and branding fit for growth support."
+    elif profile == "trades_bidcloser":
+        if not raw.get("selling_products"):
+            score += 6
+        if qualification["likely_needs_bidcloser"]:
+            score += 8
+        if qualification["likely_needs_bidrescue"]:
+            score += 8
+        if any(term in search_text for term in ["quote", "estimate", "contractor", "service", "remodel"]):
+            score += 6
+        context = "Evaluated under trades_bidcloser profile. High likelihood of estimate-based sales process."
+    elif profile == "real_estate_agents":
+        if any(term in search_text for term in ["real estate", "agent", "broker", "listing", "realtor"]):
+            score += 10
+        if raw.get("active_social"):
+            score += 8
+        if raw.get("contact_name"):
+            score += 6
+        if raw.get("phone") and raw.get("email"):
+            score += 6
+        context = "Evaluated under real_estate_agents profile. Signals suggest conversion depends on personal follow-up."
+    else:
+        context = f"Evaluated under {profile} profile."
+
+    return score, context
+
+
+def score_lead(raw: dict[str, Any], keyword: str, profile: str) -> tuple[int, dict[str, bool], str, str]:
     """Score a lead using the rules in lead_scoring.md."""
     score = 0
 
@@ -106,6 +156,14 @@ def score_lead(raw: dict[str, Any], keyword: str) -> tuple[int, dict[str, bool],
     if industry in irrelevant_industries:
         score -= 25
 
+    qualification = {
+        "likely_needs_ebroker": likely_needs_ebroker,
+        "likely_needs_bidcloser": likely_needs_bidcloser,
+        "likely_needs_bidrescue": likely_needs_bidrescue,
+        "likely_needs_plug_play_marketer": likely_needs_plug_play,
+    }
+
+    score, profile_context = apply_profile_scoring(profile, raw, keyword, score, qualification)
     score = max(1, min(score, 100))
 
     if score >= 80:
@@ -116,21 +174,14 @@ def score_lead(raw: dict[str, Any], keyword: str) -> tuple[int, dict[str, bool],
         priority = "Low"
     else:
         priority = "Ignore for now"
-
-    qualification = {
-        "likely_needs_ebroker": likely_needs_ebroker,
-        "likely_needs_bidcloser": likely_needs_bidcloser,
-        "likely_needs_bidrescue": likely_needs_bidrescue,
-        "likely_needs_plug_play_marketer": likely_needs_plug_play,
-    }
-    return score, qualification, priority
+    return score, qualification, priority, profile_context
 
 
-def build_leads(keyword: str, businesses: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def build_leads(keyword: str, businesses: list[dict[str, Any]], profile: str) -> list[dict[str, Any]]:
     """Build leads in the schema format."""
     leads = []
     for raw in search_businesses(keyword, businesses):
-        score, qualification, priority = score_lead(raw, keyword)
+        score, qualification, priority, profile_context = score_lead(raw, keyword, profile)
 
         lead = {
             "business_name": raw.get("business_name", ""),
@@ -148,9 +199,10 @@ def build_leads(keyword: str, businesses: list[dict[str, Any]]) -> list[dict[str
             "likely_needs_bidcloser": "Yes" if qualification["likely_needs_bidcloser"] else "No",
             "likely_needs_bidrescue": "Yes" if qualification["likely_needs_bidrescue"] else "No",
             "likely_needs_plug_play_marketer": "Yes" if qualification["likely_needs_plug_play_marketer"] else "No",
+            "service_profile": profile,
             "lead_score": score,
             "priority": priority,
-            "observations": f"Matched keyword '{keyword}'.",
+            "observations": f"Matched keyword '{keyword}'. {profile_context}",
             "why_good_fit": f"Scored {score}/100 based on website, contactability, activity, and service fit.",
         }
         leads.append(lead)
@@ -181,6 +233,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("keyword", help="Example: 'beverage brand' or 'plumbing company'")
     parser.add_argument("--format", choices=["json", "csv"], default="json", help="Output format")
     parser.add_argument("--output", default="", help="Optional output path")
+    parser.add_argument("--profile", choices=sorted(SUPPORTED_PROFILES), default=DEFAULT_PROFILE, help="Service profile")
     return parser.parse_args()
 
 
@@ -188,7 +241,7 @@ def main() -> None:
     args = parse_args()
 
     businesses = load_mock_businesses()
-    leads = build_leads(args.keyword, businesses)
+    leads = build_leads(args.keyword, businesses, args.profile)
 
     if args.output:
         output_path = Path(args.output)
