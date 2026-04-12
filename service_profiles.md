@@ -1,18 +1,20 @@
 # Service Profiles
 
-The DUO Prospect Engine supports multiple service profiles.
-
-The base engine remains shared, while each profile can apply profile-specific fit logic and scoring emphasis.
+The DUO Prospect Engine supports multiple service profiles, now powered by a shared ingestion layer.
 
 ## Core Rule
 
-All profiles use the same lead output schema.
+All profiles consume the same normalized DUO business schema. Source-specific parsing happens in importers, not scoring logic.
 
-Profile logic can vary by:
-- target business types
-- fit and disqualifier signals
-- score interpretation
-- recommended DUO offer
+This keeps profile scoring source-agnostic and lets future data connectors plug in without rewriting profile rules.
+
+## Ingestion + profile flow
+
+1. Import source data (mock, Google Maps CSV, standard CSV).
+2. Normalize to DUO schema (`business_name`, `industry`, `services`, `review_count`, etc.).
+3. Preserve `source`, `source_type`, and `raw_source_payload` for traceability.
+4. Run shared search + profile scoring.
+5. Export leads with human-readable observations and source context.
 
 ## Profiles
 
@@ -55,7 +57,7 @@ Best-fit trades:
 - handymen
 - service-call-first businesses
 
-Scoring is source-agnostic and can use licensing, website, review/directory, and social/business evidence.
+Scoring remains source-agnostic and can use licensing, website, review/directory, and social/business evidence from any normalized input source.
 
 Score interpretation:
 - 85 to 100 = Prime prospect
