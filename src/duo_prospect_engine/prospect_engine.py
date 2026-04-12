@@ -14,6 +14,27 @@ DEFAULT_PROFILE = "cpg_brokerage"
 SUPPORTED_PROFILES = {"cpg_brokerage", "trades_bidcloser", "real_estate_agents"}
 SUPPORTED_INPUT_SOURCES = {"mock", "google_maps_csv"}
 
+TIER_1_TRADES = {
+    "kitchen remodeler",
+    "bathroom remodeler",
+    "cabinet",
+    "countertop",
+    "flooring",
+    "tile contractor",
+}
+TIER_2_TRADES = {
+    "window",
+    "door",
+    "roofing",
+    "deck",
+    "patio",
+    "painting",
+    "finish carpentry",
+    "closet",
+    "garage buildout",
+}
+TIER_3_TRADES = {"plumber", "electrician", "hvac", "handyman"}
+
 
 def load_mock_businesses(data_file: Path = DEFAULT_DATA_FILE) -> list[dict[str, Any]]:
     """Load local mock businesses used for the first version of the engine."""
@@ -60,6 +81,255 @@ def infer_selling_products(category: str) -> bool:
         "brand",
     }
     return any(signal in text for signal in product_signals)
+
+
+def _safe_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        cleaned = value.strip().replace("$", "").replace(",", "")
+        if cleaned.isdigit():
+            return int(cleaned)
+    return None
+
+
+def _safe_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        cleaned = value.strip().replace("$", "").replace(",", "")
+        try:
+            return float(cleaned)
+        except ValueError:
+            return None
+    return None
+
+
+def _as_text_blob(raw: dict[str, Any], keys: list[str]) -> str:
+    values: list[str] = []
+    for key in keys:
+        value = raw.get(key)
+        if isinstance(value, list):
+            values.extend(str(item) for item in value if item is not None)
+        elif value is not None:
+            values.append(str(value))
+    return " ".join(values).lower()
+
+
+def _score_trade_fit(raw: dict[str, Any]) -> tuple[int, str]:
+    trade_text = _as_text_blob(raw, ["industry", "category", "business_name", "services", "service_lines"])
+    if any(term in trade_text for term in TIER_1_TRADES):
+        return 20, "Tier 1 trade match."
+    if any(term in trade_text for term in TIER_2_TRADES):
+        return 12, "Tier 2 trade match."
+    if any(term in trade_text for term in TIER_3_TRADES):
+        return 5, "Tier 3 trade match."
+    if any(term in trade_text for term in ["remodel", "install", "contractor", "builder"]):
+        return 8, "General estimate-driven trade match."
+    return 0, "Poor fit trade."
+
+
+def _score_business_size_fit(raw: dict[str, Any]) -> tuple[int, str]:
+    revenue = _safe_int(raw.get("annual_revenue") or raw.get("estimated_revenue") or raw.get("revenue"))
+    employees = _safe_int(raw.get("employee_count") or raw.get("employees") or raw.get("team_size"))
+
+    ideal_revenue = revenue is not None and 1_000_000 <= revenue <= 5_000_000
+    workable_revenue = revenue is not None and 750_000 <= revenue <= 8_000_000
+    ideal_employees = employees is not None and 5 <= employees <= 15
+    workable_employees = employees is not None and 3 <= employees <= 25
+
+    if ideal_revenue and ideal_employees:
+        return 15, "Ideal revenue and team size."
+    if (ideal_revenue and workable_employees) or (ideal_employees and workable_revenue) or (
+        workable_revenue and workable_employees
+    ):
+        return 10, "Good size fit."
+    if revenue is None and employees is None:
+        return 5, "Missing size data; plausible by default."
+    if (revenue is not None and 500_000 <= revenue <= 10_000_000) or (employees is not None and 2 <= employees <= 40):
+        return 5, "Uncertain but plausible size fit."
+    return 2, "Very small/large or poor size fit."
+
+
+def _score_sales_model_fit(raw: dict[str, Any]) -> tuple[int, str]:
+    text = _as_text_blob(raw, ["industry", "services", "service_lines", "website_text", "description", "offerings"])
+    avg_job_size = _safe_float(raw.get("avg_job_size") or raw.get("average_job_size"))
+
+    quote_signals = sum(
+        1
+        for term in ["estimate", "quote", "project", "remodel", "installation", "design-build", "portfolio", "gallery"]
+        if term in text
+    )
+    service_call_signals = sum(
+        1
+        for term in ["emergency", "24/7", "repair", "dispatch", "service call", "same day", "cheap", "low-cost"]
+        if term in text
+    )
+
+    if avg_job_size is not None and 7_500 <= avg_job_size <= 30_000 and quote_signals >= 2 and service_call_signals == 0:
+        return 20, "Strongly quote/project based sales model."
+    if quote_signals >= 2 and service_call_signals <= 1 and (avg_job_size is None or avg_job_size >= 3_000):
+        return 20, "Strong quote-based evidence from public signals."
+    if quote_signals >= 1 and service_call_signals <= 2:
+        return 12, "Mixed project and service-call signals."
+    if quote_signals == 0 and service_call_signals == 0:
+        return 6, "Sales model unclear."
+    return 2, "Mostly service-call/dispatch/commodity model."
+
+
+def _score_pain_fit(raw: dict[str, Any]) -> tuple[int, str]:
+    text = _as_text_blob(raw, ["reviews_summary", "description", "website_text", "sales_notes", "observation_notes"])
+    explicit_flags = sum(
+        1
+        for key in [
+            "price_objection_pressure",
+            "bid_match_requests",
+            "scope_comparison_friction",
+            "owner_led_estimator_process",
+            "discount_pressure",
+        ]
+        if raw.get(key)
+    )
+    inferred_signals = sum(
+        1
+        for term in ["cheaper", "match bid", "compare quote", "scope", "follow-up", "discount", "estimate process"]
+        if term in text
+    )
+    total_signals = explicit_flags + inferred_signals
+    if total_signals >= 4:
+        return 20, "Strong Bid Closer pain-fit evidence."
+    if total_signals >= 2:
+        return 12, "Moderate pain-fit evidence."
+    if total_signals == 1:
+        return 5, "Weak pain-fit evidence."
+    return 0, "Little pain-fit evidence found."
+
+
+def _score_professional_maturity(raw: dict[str, Any]) -> tuple[int, str]:
+    score = 0
+    website_quality = str(raw.get("website_quality", "")).lower()
+    review_count = _safe_int(raw.get("review_count") or raw.get("google_maps_review_count"))
+    years = _safe_int(raw.get("years_in_business"))
+
+    if raw.get("website"):
+        score += 3
+    if website_quality in {"high", "modern", "professional"}:
+        score += 4
+    elif website_quality in {"medium", "decent"}:
+        score += 2
+    if (review_count or 0) >= 50:
+        score += 3
+    elif (review_count or 0) >= 15:
+        score += 2
+    if (years or 0) >= 5:
+        score += 2
+    elif (years or 0) >= 2:
+        score += 1
+    if raw.get("active_social"):
+        score += 2
+    if raw.get("is_operating", True):
+        score += 1
+
+    if score >= 12:
+        return 15, "Strong presence, reputation, and active business signals."
+    if score >= 8:
+        return 10, "Decent professional maturity signals."
+    if score >= 3:
+        return 4, "Weak but present maturity signals."
+    return 0, "Poor or incomplete public presence."
+
+
+def _score_growth_investability(raw: dict[str, Any]) -> tuple[int, str]:
+    text = _as_text_blob(raw, ["website_text", "social_activity", "description", "growth_notes"])
+    cues = 0
+    cues += int(bool(raw.get("active_social")))
+    cues += int(bool(raw.get("recent_posts")))
+    cues += int(bool(raw.get("is_hiring")))
+    cues += int(bool(raw.get("has_showroom")))
+    cues += int(bool(raw.get("financing_available")))
+    cues += int(any(term in text for term in ["new location", "expanding", "hiring", "project spotlight", "before and after"]))
+
+    if cues >= 4:
+        return 10, "Strong growth/investability cues."
+    if cues >= 2:
+        return 6, "Some growth cues."
+    if cues == 1:
+        return 2, "Weak growth cues."
+    return 0, "No meaningful growth cues."
+
+
+def _disqualifier_adjustment(raw: dict[str, Any]) -> tuple[int, list[str]]:
+    text = _as_text_blob(raw, ["industry", "description", "website_text", "services", "service_lines", "business_model"])
+    penalties = 0
+    notes: list[str] = []
+
+    if any(term in text for term in ["emergency service", "24/7 emergency", "service call first"]):
+        penalties -= 15
+        notes.append("Disqualifier: mostly emergency/service-call positioning.")
+    if any(term in text for term in ["cheap", "lowest price", "budget only", "discount specialist"]):
+        penalties -= 10
+        notes.append("Disqualifier: strongly low-price branding.")
+    if raw.get("license_status") and str(raw.get("license_status")).lower() not in {"active", "current"}:
+        penalties -= 15
+        notes.append("Disqualifier: questionable or inactive license status.")
+    if raw.get("business_model") and "subcontractor only" in str(raw.get("business_model")).lower():
+        penalties -= 12
+        notes.append("Disqualifier: primarily subcontractor-only model.")
+    if raw.get("branch_type") and any(term in str(raw.get("branch_type")).lower() for term in ["corporate", "franchise"]):
+        penalties -= 10
+        notes.append("Disqualifier: local buying authority unclear.")
+    has_presence = any([raw.get("website"), raw.get("phone"), raw.get("active_social"), raw.get("review_count"), raw.get("google_maps_review_count")])
+    if not has_presence:
+        penalties -= 12
+        notes.append("Disqualifier: no meaningful public presence.")
+    if raw.get("avg_job_size") is not None and (_safe_float(raw.get("avg_job_size")) or 0) < 1_000:
+        penalties -= 8
+        notes.append("Disqualifier: mostly tiny-ticket work.")
+
+    return penalties, notes
+
+
+def _score_trades_bidcloser(raw: dict[str, Any]) -> tuple[int, list[str], bool, bool]:
+    breakdown: list[str] = []
+
+    trade_points, trade_note = _score_trade_fit(raw)
+    size_points, size_note = _score_business_size_fit(raw)
+    sales_points, sales_note = _score_sales_model_fit(raw)
+    pain_points, pain_note = _score_pain_fit(raw)
+    maturity_points, maturity_note = _score_professional_maturity(raw)
+    growth_points, growth_note = _score_growth_investability(raw)
+    penalties, disqualifier_notes = _disqualifier_adjustment(raw)
+
+    base_score = trade_points + size_points + sales_points + pain_points + maturity_points + growth_points
+    total = max(1, min(base_score + penalties, 100))
+
+    breakdown.extend(
+        [
+            f"Trade fit {trade_points}/20 - {trade_note}",
+            f"Business size fit {size_points}/15 - {size_note}",
+            f"Sales model fit {sales_points}/20 - {sales_note}",
+            f"Pain-fit evidence {pain_points}/20 - {pain_note}",
+            f"Professional maturity {maturity_points}/15 - {maturity_note}",
+            f"Growth/investability {growth_points}/10 - {growth_note}",
+        ]
+    )
+    if penalties:
+        breakdown.append(f"Disqualifier adjustment {penalties} points.")
+        breakdown.extend(disqualifier_notes)
+
+    likely_bidcloser = trade_points >= 8 and sales_points >= 12 and pain_points >= 5
+    likely_bidrescue = likely_bidcloser and (pain_points >= 12 or penalties < 0)
+    return total, breakdown, likely_bidcloser, likely_bidrescue
 
 
 def load_google_maps_csv(data_file: Path) -> list[dict[str, Any]]:
@@ -126,7 +396,10 @@ def search_businesses(keyword: str, businesses: list[dict[str, Any]]) -> list[di
 
     matches: list[dict[str, Any]] = []
     for business in businesses:
-        text = f"{business.get('business_name', '')} {business.get('industry', '')}".lower()
+        text = _as_text_blob(
+            business,
+            ["business_name", "industry", "category", "description", "services", "service_lines", "website_text"],
+        )
         if query in text:
             matches.append(business)
 
@@ -135,7 +408,10 @@ def search_businesses(keyword: str, businesses: list[dict[str, Any]]) -> list[di
 
     query_terms = query.split()
     for business in businesses:
-        text = f"{business.get('business_name', '')} {business.get('industry', '')}".lower()
+        text = _as_text_blob(
+            business,
+            ["business_name", "industry", "category", "description", "services", "service_lines", "website_text"],
+        )
         if any(term in text for term in query_terms):
             matches.append(business)
     return matches
@@ -164,15 +440,8 @@ def apply_profile_scoring(
             score += 6
         context = "Evaluated under cpg_brokerage profile. Strong product and branding fit for growth support."
     elif profile == "trades_bidcloser":
-        if not raw.get("selling_products"):
-            score += 6
-        if qualification["likely_needs_bidcloser"]:
-            score += 8
-        if qualification["likely_needs_bidrescue"]:
-            score += 8
-        if any(term in search_text for term in ["quote", "estimate", "contractor", "service", "remodel"]):
-            score += 6
-        context = "Evaluated under trades_bidcloser profile. High likelihood of estimate-based sales process."
+        score = max(score, 1)
+        context = "Evaluated under trades_bidcloser Bid Closer profile."
     elif profile == "real_estate_agents":
         if any(term in search_text for term in ["real estate", "agent", "broker", "listing", "realtor"]):
             score += 10
@@ -191,6 +460,25 @@ def apply_profile_scoring(
 
 def score_lead(raw: dict[str, Any], keyword: str, profile: str) -> tuple[int, dict[str, bool], str, str]:
     """Score a lead using the rules in lead_scoring.md."""
+    if profile == "trades_bidcloser":
+        trades_score, breakdown, likely_bidcloser, likely_bidrescue = _score_trades_bidcloser(raw)
+        qualification = {
+            "likely_needs_ebroker": False,
+            "likely_needs_bidcloser": likely_bidcloser,
+            "likely_needs_bidrescue": likely_bidrescue,
+            "likely_needs_plug_play_marketer": False,
+        }
+        if trades_score >= 85:
+            priority = "Prime prospect"
+        elif trades_score >= 70:
+            priority = "Very good prospect"
+        elif trades_score >= 55:
+            priority = "Secondary prospect"
+        else:
+            priority = "Do not prioritize"
+        context = "Bid Closer qualification scoring. " + " ".join(breakdown)
+        return trades_score, qualification, priority, context
+
     score = 0
 
     has_website = bool(raw.get("website"))
@@ -309,7 +597,7 @@ def build_leads(keyword: str, businesses: list[dict[str, Any]], profile: str) ->
             "observations": (
                 f"Matched keyword '{keyword}'. {profile_context} {google_context}".strip()
             ),
-            "why_good_fit": f"Scored {score}/100 based on website, contactability, activity, and service fit.",
+            "why_good_fit": f"Scored {score}/100 based on profile-specific fit evidence and available public signals.",
         }
         leads.append(lead)
 

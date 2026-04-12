@@ -1,22 +1,20 @@
 # Service Profiles
 
-The DUO Prospect Engine should support multiple service profiles.
+The DUO Prospect Engine supports multiple service profiles.
 
-The engine itself stays the same.
-
-What changes by profile:
-- target industries
-- fit signals
-- scoring emphasis
-- recommended DUO offer
+The base engine remains shared, while each profile can apply profile-specific fit logic and scoring emphasis.
 
 ## Core Rule
 
-All profiles should use the same base lead structure and general scoring framework.
+All profiles use the same lead output schema.
 
-Each profile adds its own service-specific fit logic.
+Profile logic can vary by:
+- target business types
+- fit and disqualifier signals
+- score interpretation
+- recommended DUO offer
 
-## Initial Profiles
+## Profiles
 
 ### cpg_brokerage
 Use for:
@@ -29,35 +27,45 @@ Best DUO offers:
 - eBroker
 - Plug & Play Marketer
 
-Key fit signals:
-- product-based business
-- retail-ready appearance
-- weak or growing brand presence
-- likely needs outreach, positioning, or retail growth
+### trades_bidcloser (Bid Closer qualification)
+Use for estimate-driven trade businesses.
 
-### trades_bidcloser
-Use for:
-- remodelers
-- roofers
-- painters
-- railing companies
-- concrete contractors
-- deck builders
-- fencing companies
-- kitchen and bath remodelers
-- other estimate-based businesses
+Best-fit trades:
+
+**Tier 1**
+- kitchen remodelers
+- bathroom remodelers
+- cabinet companies
+- countertop companies
+- flooring companies
+- tile contractors
+
+**Tier 2**
+- window and door companies
+- roofing companies
+- deck and patio builders
+- painting companies doing larger bid-based jobs
+- finish carpentry companies
+- closet/garage buildout companies
+
+**Tier 3 / lower priority**
+- plumbers
+- electricians
+- HVAC
+- handymen
+- service-call-first businesses
+
+Scoring is source-agnostic and can use licensing, website, review/directory, and social/business evidence.
+
+Score interpretation:
+- 85 to 100 = Prime prospect
+- 70 to 84 = Very good prospect
+- 55 to 69 = Secondary prospect
+- below 55 = Do not prioritize
 
 Best DUO offers:
 - BidCloser
 - BidRescue
-
-Key fit signals:
-- estimate-based selling
-- service business
-- likely quote/follow-up friction
-- likely price objections
-- larger ticket jobs
-- sales depends on lead response and close rate
 
 ### real_estate_agents
 Use for:
@@ -69,14 +77,3 @@ Use for:
 Best DUO offers:
 - future real estate offer
 - future AI follow-up / conversion tools
-
-Key fit signals:
-- active listings
-- active marketing presence
-- lead conversion dependence
-- personal brand importance
-- likely follow-up and objection handling needs
-
-## Future Rule
-
-The engine should be easy to expand with more profiles later without rewriting the whole system.
