@@ -1,93 +1,125 @@
-# DUO Prospect Engine (v1)
+# DUO Prospect Engine (v2 ingestion layer)
 
-This repository includes a working version of the prospecting engine.
+This repository now includes a **source-agnostic ingestion layer** for Bid Closer and other DUO prospecting workflows.
 
 ## What it does
 
-- Takes an optional keyword (example: `beverage brand`, `kitchen remodeler`)
-- Supports two input modes:
-  - `mock` (default): local JSON test data (`data/mock_businesses.json`)
-  - `google_maps_csv`: Google Maps-style CSV import (`data/google_maps_sample.csv`)
-- Builds leads using the DUO lead schema
-- Scores each lead by service profile
-- Exports clean output to JSON or CSV
+- Accepts input from multiple source formats.
+- Normalizes every source into one canonical DUO business schema.
+- Preserves source metadata and raw source payload for traceability.
+- Runs search + scoring on normalized records (without changing profile logic per source).
+- Exports normalized records and lead outputs to JSON/CSV.
 
-## Bid Closer trade scoring (source-agnostic)
+## Supported input sources
 
-The `trades_bidcloser` profile now runs a Bid Closer qualification model scored out of 100 and is intentionally **source-agnostic**.
+- `mock` (default): `data/mock_businesses.json`
+- `google_maps_csv`: Google Maps-style CSV export (`data/google_maps_sample.csv`)
+- `standard_csv`: DUO-friendly normalized flat CSV (`data/standard_businesses_sample.csv`)
 
-It evaluates whatever evidence is available (without depending on any single source):
-- licensing/registration status and years in business
-- website language (`request a quote`, `free estimate`, project pages)
-- review/directory reputation and recency proxies
-- social/business activity and growth cues
-- size and sales-model proxies
+## Standard DUO business schema
 
-Missing fields are handled with graceful defaults so leads still score with partial data.
-
-Category weights:
-- Trade fit (20)
-- Business size fit (15)
-- Sales model fit (20)
-- Pain-fit evidence (20)
-- Professional maturity (15)
-- Growth/investability (10)
-
-Disqualifier penalties are applied when signals indicate emergency-first dispatch, tiny-ticket focus, low-price branding, inactive licensing, or poor public presence.
-
-Interpretation:
-- 85–100 = Prime prospect
-- 70–84 = Very good prospect
-- 55–69 = Secondary prospect
-- <55 = Do not prioritize
-
-## Project structure
-
-- `run_engine.py` → simple script to run the engine
-- `src/duo_prospect_engine/prospect_engine.py` → input loading, search, scoring, schema mapping, and export logic
-- `data/mock_businesses.json` → sample business dataset
-- `data/google_maps_sample.csv` → sample Google Maps-style CSV input
-- `output/` → generated lead files
-
-## Quick start
-
-From the repo root:
-
-### 1) Run mock mode (default)
-
-```bash
-python run_engine.py "beverage brand" --format json
-python run_engine.py "kitchen remodeler" --profile trades_bidcloser --format json
-```
-
-### 2) Run Google Maps CSV mode
-
-Use the sample file:
-
-```bash
-python run_engine.py "remodel" --input-source google_maps_csv --input-file data/google_maps_sample.csv --profile trades_bidcloser --format json
-```
-
-Load all rows (no keyword filter):
-
-```bash
-python run_engine.py --input-source google_maps_csv --input-file data/google_maps_sample.csv --format csv
-```
-
-## Google Maps CSV columns
-
-The `google_maps_csv` import expects these columns:
+The normalized ingestion schema includes:
 
 - `business_name`
-- `category`
-- `website_url`
+- `website`
 - `phone`
+- `email`
 - `address`
 - `city`
 - `state`
-- `rating`
+- `zip`
+- `location`
+- `category`
+- `industry`
+- `services`
+- `service_lines`
+- `description`
 - `review_count`
+- `rating`
+- `years_in_business`
+- `employee_count`
+- `estimated_revenue`
+- `website_quality`
+- `active_social`
+- `recent_posts`
+- `hiring`
+- `has_showroom`
+- `licensing_status`
+- `source`
+- `source_type`
+- `raw_source_payload`
 
-## Notes
+Not every source will provide every field. Missing fields are handled gracefully so scoring remains resilient.
 
-The engine is designed to keep scoring resilient to sparse data while allowing richer records from any public-source pipeline.
+## Importer pattern
+
+Current importer functions:
+
+- `import_google_maps_csv(file_path)`
+- `import_standard_csv(file_path)`
+
+The ingestion layer is structured so new importers can be added with minimal change to scoring logic, such as:
+
+- Google Places API JSON
+- state licensing exports
+- directory CSV exports
+- VA/manual research CSVs
+
+## Quick start
+
+From repo root:
+
+### 1) Mock mode (backward compatible)
+
+```bash
+python run_engine.py "kitchen remodeler" --profile trades_bidcloser --format json
+```
+
+### 2) Google Maps CSV ingestion
+
+```bash
+python run_engine.py "remodel" \
+  --input-source google_maps_csv \
+  --input-file data/google_maps_sample.csv \
+  --profile trades_bidcloser \
+  --export-normalized output/normalized_google_maps.json \
+  --format json
+```
+
+### 3) Standard CSV ingestion
+
+```bash
+python run_engine.py "kitchen" \
+  --input-source standard_csv \
+  --input-file data/standard_businesses_sample.csv \
+  --profile trades_bidcloser \
+  --export-normalized output/normalized_standard.csv.json \
+  --format csv
+```
+
+### 4) Load all rows (no keyword filter)
+
+```bash
+python run_engine.py \
+  --input-source standard_csv \
+  --input-file data/standard_businesses_sample.csv \
+  --format json
+```
+
+## Traceability in output leads
+
+Each output lead now includes:
+
+- `source`
+- `source_type`
+- `source_context` (address/location/raw payload context)
+- human-readable `observations` with source details
+
+## Project structure
+
+- `run_engine.py` → CLI launcher
+- `src/duo_prospect_engine/prospect_engine.py` → ingestion, normalization, scoring, export
+- `data/mock_businesses.json` → legacy mock data
+- `data/google_maps_sample.csv` → Google Maps sample input
+- `data/standard_businesses_sample.csv` → normalized flat CSV sample
+- `output/` → generated files
