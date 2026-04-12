@@ -68,6 +68,22 @@ Use the sample file:
 python run_engine.py "remodel" --input-source google_maps_csv --input-file data/google_maps_sample.csv --profile trades_bidcloser --format json
 ```
 
+Example JSON shape (website fields are aligned):
+
+```json
+[
+  {
+    "business_name": "Sample Beverage Co",
+    "website_url": "https://samplebeverageco.com",
+    "has_website": "Yes",
+    "website_quality": "Medium",
+    "google_maps_address": "123 Main St, Austin, TX 78701",
+    "google_maps_rating": 4.6,
+    "google_maps_review_count": 128
+  }
+]
+```
+
 Load all rows (no keyword filter):
 
 ```bash
